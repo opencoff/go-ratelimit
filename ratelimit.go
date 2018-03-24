@@ -1,39 +1,43 @@
-//
-// Ratelimiting incoming connections - Small Library
+// ratelimit.go - Token bucket ratelimiter
 //
 // (c) 2013 Sudhi Herle <sudhi-dot-herle-at-gmail-com>
 //
 // License: GPLv2
 //
 
-// Notes:
-//  - This is a very simple interface for token-bucket rate limiter.
-//  - Based on Anti Huimaa's very clever token bucket algorithm:
-//    http://stackoverflow.com/questions/667508/whats-a-good-rate-limiting-algorithm
-//  - The core idea is that every call to ask for a Token also "drip fills"
-//    the bucket with fractional tokens.
-//  - To evenly drip-fill the bucket, we do all our calculations in
-//    millseconds
-//  - A Clock interface abstracts the timekeeping; useful for test harness
-//  - Most callers will call the New() function; the test suite
-//    calls the NewWithClock() constructor.
+// Package ratelimit implements a token bucket rate limiter. It does NOT use any
+// timers or channels in its implementation. The core idea is that every call
+// to ask for a Token also "drip fills" the bucket with fractional tokens.
+// To evenly drip-fill the bucket, we do all our calculations in millseconds.
+//
+// To ratelimit incoming connections on a per source basis, a convenient helper
+// constructor is available for "PerIPRateLimiter".
 //
 // Usage:
-//    rate = 1000
-//    per  = 5
-//    rl = ratelimit.New(rate, per) // ratelimit to 1000 every 5 seconds
+//    // Ratelimit to 1000 every 5 seconds
+//    rl = ratelimit.New(1000, 5)
 //
 //    ....
 //    if rl.Limit() {
-//       drop_connection(conn)
+//       dropConnection(conn)
 //    }
-//
 package ratelimit
+
+// Notes:
+//
+// - A Clock interface abstracts the timekeeping; useful for test harness
+// - Most callers will call the New() function; the test suite
+//   calls the NewWithClock() constructor.
+// - This is a very simple interface for token-bucket rate limiter.
+// - Based on Anti Huimaa's very clever token bucket algorithm:
+//   http://stackoverflow.com/questions/667508/whats-a-good-rate-limiting-algorithm
+//
 
 import (
 	"time"
 )
 
+// Ratelimiter abstracts the data needed for the token bucket limiter
 type Ratelimiter struct {
 	rate      float64   // rate of drain
 	per       float64   // seconds over which the rate is measured
@@ -44,9 +48,8 @@ type Ratelimiter struct {
 	clock     Clock     // timekeeper
 }
 
-// Clock provides an interface to timekeeping. It was created to help with tests.
+// Clock provides an interface to timekeeping. It is used in test harness.
 type Clock interface {
-
 	// Return current time in seconds
 	Now() time.Time
 }

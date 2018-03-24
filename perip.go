@@ -5,8 +5,6 @@
 // License: GPLv2
 //
 
-// This uses the underlying Ratelimiter class to provide a simple
-// interface for managing rate limits per source (IP:port)
 package ratelimit
 
 import (
@@ -15,7 +13,7 @@ import (
 )
 
 // Manages a map of source IP:port to underlying ratelimiter.
-// In case of a DoS/DDoS attack, this map can grow unbounded.
+// Note: In case of a DoS/DDoS attack, this map can grow unbounded.
 // TODO Add some kind of limit to the # of map entries.
 type PerIPRatelimiter struct {
 	rl map[string]*Ratelimiter
@@ -24,6 +22,8 @@ type PerIPRatelimiter struct {
 	rate, per int // rate/per for the underlying limiter
 }
 
+// Create a new per-source rate limiter to limit each IP (host)
+// to 'ratex' every 'perx' seconds.
 func NewPerIPRatelimiter(ratex, perx int) (*PerIPRatelimiter, error) {
 
 	p := &PerIPRatelimiter{
