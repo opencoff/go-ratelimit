@@ -8,26 +8,51 @@
 package ratelimit
 
 import (
+	"fmt"
 	"net"
 	"sync"
+
+	"github.com/hashicorp/golang-lru"
 )
 
 // Manages a map of source IP:port to underlying ratelimiter.
 // Note: In case of a DoS/DDoS attack, this map can grow unbounded.
 // TODO Add some kind of limit to the # of map entries.
-type PerIPRatelimiter struct {
-	rl map[string]*Ratelimiter
-	mu sync.Mutex
+type PerIPRateLimiter struct {
+	sync.Mutex
+
+	rl *lru.TwoQueueCache
 
 	rate, per int // rate/per for the underlying limiter
 }
 
 // Create a new per-source rate limiter to limit each IP (host)
-// to 'ratex' every 'perx' seconds.
-func NewPerIPRatelimiter(ratex, perx int) (*PerIPRatelimiter, error) {
+// to 'ratex' every 'perx' seconds. Hold a maximum of 'max' IP addresses in the rate-limiter
+func NewPerIP(ratex, perx int, max int) (*PerIPRateLimiter, error) {
+	var err error
 
-	p := &PerIPRatelimiter{
-		rl:   make(map[string]*Ratelimiter),
+	// Validate params one time.
+	_, err = New(ratex, perx)
+	if err != nil {
+		return nil, err
+	}
+
+	var q *lru.TwoQueueCache
+
+	if max <= 0 {
+		return nil, fmt.Errorf("per-ip rate limiter needs a non-zero max size (saw %d)", max)
+	}
+
+	if ratex > 0 {
+		// XXX hard-coded ratios?
+		q, err = lru.New2QParams(max, 0.65, 0.35)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	p := &PerIPRateLimiter{
+		rl:   q,
 		rate: ratex,
 		per:  perx,
 	}
@@ -37,20 +62,30 @@ func NewPerIPRatelimiter(ratex, perx int) (*PerIPRatelimiter, error) {
 
 // Return true if the source 'a' needs to be rate limited, false
 // otherwise.
-func (p *PerIPRatelimiter) Limit(a net.Addr) bool {
-	s := a.String()
+func (p *PerIPRateLimiter) Limit(a net.Addr) bool {
 
-	p.mu.Lock()
-
-	r, ok := p.rl[s]
-	if !ok {
-		r, _ = New(p.rate, p.per)
-		p.rl[s] = r
+	// Unlimited rate
+	if p.rl == nil {
+		return false
 	}
 
-	p.mu.Unlock()
+	s := a.String()
 
-	return r.Limit()
+	var z *RateLimiter
+
+	// XXX If only we had an LRU "Probe" method that inserted if non-existent and
+	// returned an existing entry if it did.
+
+	p.Lock()
+	if r, ok := p.rl.Get(s); ok {
+		z = r.(*RateLimiter)
+	} else {
+		z, _ = New(p.rate, p.per)
+		p.rl.Add(s, z)
+	}
+	p.Unlock()
+
+	return z.Limit()
 }
 
 // vim: noexpandtab:ts=8:sw=8:tw=92:

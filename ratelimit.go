@@ -34,11 +34,12 @@ package ratelimit
 //
 
 import (
+	"sync"
 	"time"
 )
 
-// Ratelimiter abstracts the data needed for the token bucket limiter
-type Ratelimiter struct {
+// RateLimiter represents a token-bucket rate limiter
+type RateLimiter struct {
 	rate      float64   // rate of drain
 	per       float64   // seconds over which the rate is measured
 	frac      float64   // rate / milliseconds; this is the drip fill rate
@@ -46,6 +47,8 @@ type Ratelimiter struct {
 	last      time.Time // last time we refreshed the tokens
 	unlimited bool      // set to true if rate is 0
 	clock     Clock     // timekeeper
+
+	sync.Mutex
 }
 
 // Clock provides an interface to timekeeping. It is used in test harness.
@@ -62,14 +65,14 @@ func (*defaultTime) Now() time.Time {
 }
 
 // Create new limiter that limits to 'rate' every 'per' seconds
-func New(rate, per int) (*Ratelimiter, error) {
+func New(rate, per int) (*RateLimiter, error) {
 
 	clk := defaultTime(0)
 	return NewWithClock(rate, per, &clk)
 }
 
 // Make a new rate limiter using a custom timekeeper
-func NewWithClock(rate, per int, clk Clock) (*Ratelimiter, error) {
+func NewWithClock(rate, per int, clk Clock) (*RateLimiter, error) {
 
 	if rate <= 0 {
 		rate = 0
@@ -78,7 +81,7 @@ func NewWithClock(rate, per int, clk Clock) (*Ratelimiter, error) {
 		per = 1
 	}
 
-	r := Ratelimiter{
+	r := RateLimiter{
 		rate:   float64(rate),
 		frac:   float64(rate) / float64(per*1000),
 		last:   clk.Now(),
@@ -94,7 +97,7 @@ func NewWithClock(rate, per int, clk Clock) (*Ratelimiter, error) {
 }
 
 // Compute elapsed time in milliseconds since 'last'
-func (r *Ratelimiter) elapsed(last time.Time) (now time.Time, since float64) {
+func (r *RateLimiter) elapsed(last time.Time) (now time.Time, since float64) {
 	now = r.clock.Now()
 	nsec := now.Sub(last).Nanoseconds()
 	since = float64(nsec) / 1.0e6
@@ -104,15 +107,18 @@ func (r *Ratelimiter) elapsed(last time.Time) (now time.Time, since float64) {
 
 // Return true if the current call exceeds the set rate, false
 // otherwise
-func (r *Ratelimiter) Limit() bool {
-
-	var since float64
+func (r *RateLimiter) Limit() bool {
 
 	// handle cases where rate in config file is unset - defaulting
 	// to unlimited
 	if r.unlimited {
 		return false
 	}
+
+	r.Lock()
+	defer r.Unlock()
+
+	var since float64
 
 	r.last, since = r.elapsed(r.last)
 	r.tokens += since * r.frac
