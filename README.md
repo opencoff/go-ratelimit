@@ -8,10 +8,12 @@ any timers or channels.
   the bucket with fractional tokens.
 - To evenly drip-fill the bucket, we do all our calculations in
   millseconds.
+- The interface supports creating rate limiter instances with a burst factor.
 
 There is an ancilliary class to do per-IP ratelimiting that uses the
-underlying library.
+underlying library. The per-IP module use a fixed size LRU cache of the underlying
+ratelimiter.
 
 ## Notes
-- This is based on Anti Huimaa's very clever token bucket algorithm:
-  http://stackoverflow.com/questions/667508/whats-a-good-rate-limiting-algorithm
+This is based on Anti Huimaa's very clever token bucket algorithm:
+http://stackoverflow.com/questions/667508/whats-a-good-rate-limiting-algorithm

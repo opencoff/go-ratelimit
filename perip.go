@@ -12,7 +12,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/hashicorp/golang-lru"
+	"github.com/opencoff/golang-lru"
 )
 
 // Manages a map of source IP:port to underlying ratelimiter.
@@ -23,12 +23,13 @@ type PerIPRateLimiter struct {
 
 	rl *lru.TwoQueueCache
 
-	rate, per int // rate/per for the underlying limiter
+	rate, per uint // rate/per for the underlying limiter
 }
 
 // Create a new per-source rate limiter to limit each IP (host)
-// to 'ratex' every 'perx' seconds. Hold a maximum of 'max' IP addresses in the rate-limiter
-func NewPerIP(ratex, perx int, max int) (*PerIPRateLimiter, error) {
+// to 'ratex' every 'perx' seconds. Hold a maximum of 'max'
+// IP addresses in the rate-limiter
+func NewPerIP(ratex, perx uint, max int) (*PerIPRateLimiter, error) {
 	var err error
 
 	// Validate params one time.

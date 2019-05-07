@@ -34,6 +34,7 @@ package ratelimit
 //
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -44,6 +45,7 @@ type RateLimiter struct {
 	per       float64   // seconds over which the rate is measured
 	frac      float64   // rate / milliseconds; this is the drip fill rate
 	tokens    float64   // tokens in the bucket
+	clamp     float64   // max tokens we will ever have
 	last      time.Time // last time we refreshed the tokens
 	unlimited bool      // set to true if rate is 0
 	clock     Clock     // timekeeper
@@ -65,27 +67,50 @@ func (*defaultTime) Now() time.Time {
 }
 
 // Create new limiter that limits to 'rate' every 'per' seconds
-func New(rate, per int) (*RateLimiter, error) {
-
+func New(rate, per uint) (*RateLimiter, error) {
 	clk := defaultTime(0)
-	return NewWithClock(rate, per, &clk)
+	return NewBurstWithClock(rate, per, 0, &clk)
 }
 
 // Make a new rate limiter using a custom timekeeper
-func NewWithClock(rate, per int, clk Clock) (*RateLimiter, error) {
+func NewWithClock(rate, per uint, clk Clock) (*RateLimiter, error) {
+	return NewBurstWithClock(rate, per, 0, clk)
+}
 
-	if rate <= 0 {
-		rate = 0
-	}
-	if per <= 0 {
+// Create new limiter that limits to 'rate' every 'per' seconds with
+// burst of 'b' tokens in the same time period. The notion of burst
+// is only meaningful when it is larger than its normal rate. Thus,
+// bursts smaller than the actual rate are ignored.
+func NewBurst(rate, per, burst uint) (*RateLimiter, error) {
+	clk := defaultTime(0)
+
+	return NewBurstWithClock(rate, per, burst, &clk)
+}
+
+// Create new limiter with a custom time keeper that limits to 'rate'
+// every 'per' seconds with burst of 'b' tokens in the same time period.
+// The notion of burst is only meaningful when it is larger than its
+// normal rate. Thus, bursts smaller than the actual rate are ignored.
+func NewBurstWithClock(rate, per, burst uint, clk Clock) (*RateLimiter, error) {
+	if per == 0 {
 		per = 1
+	}
+
+	// burst is only meaningful if it is larger than the rate. thus,
+	// the max number of tokens when we dripfill is the larger of the
+	// rate or the burst.
+
+	clamp := rate
+	if burst > rate {
+		clamp = burst
 	}
 
 	r := RateLimiter{
 		rate:   float64(rate),
 		frac:   float64(rate) / float64(per*1000),
 		last:   clk.Now(),
-		tokens: float64(rate),
+		tokens: float64(clamp),
+		clamp:  float64(clamp),
 		clock:  clk,
 	}
 
@@ -96,6 +121,7 @@ func NewWithClock(rate, per int, clk Clock) (*RateLimiter, error) {
 	return &r, nil
 }
 
+
 // Compute elapsed time in milliseconds since 'last'
 func (r *RateLimiter) elapsed(last time.Time) (now time.Time, since float64) {
 	now = r.clock.Now()
@@ -105,14 +131,11 @@ func (r *RateLimiter) elapsed(last time.Time) (now time.Time, since float64) {
 	return now, since
 }
 
-// Return true if the current call exceeds the set rate, false
-// otherwise
-func (r *RateLimiter) Limit() bool {
+// Return true if we can take 'n' tokens, false otherwise
+func (r *RateLimiter) CanTake(vn uint) bool {
 
-	// handle cases where rate in config file is unset - defaulting
-	// to unlimited
 	if r.unlimited {
-		return false
+		return true
 	}
 
 	r.Lock()
@@ -120,21 +143,33 @@ func (r *RateLimiter) Limit() bool {
 
 	var since float64
 
+	n := float64(vn)
 	r.last, since = r.elapsed(r.last)
-	r.tokens += since * r.frac
+	r.tokens += (since * r.frac)
 
-	// Clamp number of tokens in the bucket. Don't let it get
-	// unboundedly large
-	if r.tokens > r.rate {
-		r.tokens = r.rate
+	if r.tokens > r.clamp {
+		r.tokens = r.clamp
 	}
 
-	if r.tokens < 1.0 {
-		return true
+	if r.tokens < n {
+		return false
 	}
 
-	r.tokens -= 1.0
-	return false
+	r.tokens -= n
+	return true
+}
+
+// Return true if the current call exceeds the set rate, false
+// otherwise
+func (r *RateLimiter) Limit() bool {
+	return !r.CanTake(1)
+}
+
+
+// Stringer implementation for RateLimiter
+func (r RateLimiter) String() string {
+	return fmt.Sprintf("dripfill: %3.4f toks every ms burst: %3.1f toks; %3.4f toks avail",
+		r.frac, r.clamp, r.tokens)
 }
 
 // vim: noexpandtab:ts=8:sw=8:tw=92:

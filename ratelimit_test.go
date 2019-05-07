@@ -111,4 +111,20 @@ func TestLimitMany(t *testing.T) {
 	assert(rl.Limit(), "expected rl limit")
 }
 
+func TestBurst(t *testing.T) {
+	clk := newtClock()
+	assert := newAsserter(t)
+
+	// 3 tokens every 2 secs with a burst of 5
+	rl, err := NewBurstWithClock(3, 2, 5, clk)
+	assert(err == nil, "expected err to be nil; saw %s", err)
+
+	assert(rl.CanTake(5), "expected to take 5 burst")
+
+	assert(rl.Limit(), "expected rl to limit after burst")
+
+	clk.advance(700)
+	assert(!rl.Limit(), "expected rl to not limit after refill")
+}
+
 // vim: noexpandtab:ts=8:sw=8:tw=92:
