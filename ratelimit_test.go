@@ -19,8 +19,6 @@ import (
 
 	"runtime"
 	"testing"
-	// module under test
-	//"github.com/sign"
 )
 
 type tClock struct {
@@ -125,6 +123,8 @@ func TestBurst(t *testing.T) {
 
 	clk.advance(700)
 	assert(!rl.Limit(), "expected rl to not limit after refill")
+
+	assert(!rl.CanTake(3), "expected burst 3 to fail")
 }
 
 // vim: noexpandtab:ts=8:sw=8:tw=92:
