@@ -10,17 +10,13 @@ package ratelimit
 import (
 	"fmt"
 	"net"
-	"sync"
-
 	"github.com/opencoff/golang-lru"
 )
 
-// Manages a map of source IP:port to underlying ratelimiter.
-// Note: In case of a DoS/DDoS attack, this map can grow unbounded.
-// TODO Add some kind of limit to the # of map entries.
+// Manages a map of source IP:port to underlying ratelimiter
+// Each entry is in a LRU Cache. The Per-IP Limiter is bounded to a
+// maximum size when it is constructed.
 type PerIPRateLimiter struct {
-	sync.Mutex
-
 	rl *lru.TwoQueueCache
 
 	rate, per uint // rate/per for the underlying limiter
@@ -72,19 +68,11 @@ func (p *PerIPRateLimiter) Limit(a net.Addr) bool {
 
 	s := a.String()
 
-	var z *RateLimiter
-
-	// XXX If only we had an LRU "Probe" method that inserted if non-existent and
-	// returned an existing entry if it did.
-
-	p.Lock()
-	if r, ok := p.rl.Get(s); ok {
-		z = r.(*RateLimiter)
-	} else {
-		z, _ = New(p.rate, p.per)
-		p.rl.Add(s, z)
-	}
-	p.Unlock()
+	v, _ := p.rl.Probe(s, func (_ interface{}) interface{} {
+			z, _ := New(p.rate, p.per)
+			return z
+		})
+	z := v.(*RateLimiter)
 
 	return z.Limit()
 }

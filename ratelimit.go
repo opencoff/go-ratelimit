@@ -8,7 +8,7 @@
 // Package ratelimit implements a token bucket rate limiter. It does NOT use any
 // timers or channels in its implementation. The core idea is that every call
 // to ask for a Token also "drip fills" the bucket with fractional tokens.
-// To evenly drip-fill the bucket, we do all our calculations in millseconds.
+// To evenly drip-fill the bucket, we do all our calculations in nanoseconds.
 //
 // To ratelimit incoming connections on a per source basis, a convenient helper
 // constructor is available for "PerIPRateLimiter".
@@ -41,16 +41,17 @@ import (
 
 // RateLimiter represents a token-bucket rate limiter
 type RateLimiter struct {
-	rate      float64   // rate of drain
-	per       float64   // seconds over which the rate is measured
-	frac      float64   // rate / milliseconds; this is the drip fill rate
-	tokens    float64   // tokens in the bucket
-	clamp     float64   // max tokens we will ever have
-	last      time.Time // last time we refreshed the tokens
-	unlimited bool      // set to true if rate is 0
-	clock     Clock     // timekeeper
+	mu     sync.Mutex
+	cost   uint64    // cost per packet in units of nanoseconds
+	tokens uint64    // tokens in the bucket
+	maxtok uint64    // max tokens possible in the given time interval
+	last   time.Time // last time we refreshed tokens
 
-	sync.Mutex
+	rate  uint64 // rate of drain
+	burst uint64 // burst rate
+	per   uint64 // seconds over which rate is measured
+
+	clock Clock // timekeeper
 }
 
 // Clock provides an interface to timekeeping. It is used in test harness.
@@ -58,6 +59,10 @@ type Clock interface {
 	// Return current time in seconds
 	Now() time.Time
 }
+
+const (
+	_NS uint64 = 1000000000 // number of nanosecs in 1 sec
+)
 
 // dummy type
 type defaultTime int
@@ -93,83 +98,75 @@ func NewBurst(rate, per, burst uint) (*RateLimiter, error) {
 // normal rate. Thus, bursts smaller than the actual rate are ignored.
 func NewBurstWithClock(rate, per, burst uint, clk Clock) (*RateLimiter, error) {
 	if per == 0 {
-		per = 1
+		return nil, fmt.Errorf("ratelimit: duration can't be zero")
 	}
 
-	// burst is only meaningful if it is larger than the rate. thus,
-	// the max number of tokens when we dripfill is the larger of the
-	// rate or the burst.
-
-	clamp := rate
-	if burst > rate {
-		clamp = burst
+	if burst == 0 {
+		burst = rate
 	}
 
-	r := RateLimiter{
-		rate:   float64(rate),
-		frac:   float64(rate) / float64(per*1000),
-		last:   clk.Now(),
-		tokens: float64(clamp),
-		clamp:  float64(clamp),
-		clock:  clk,
+	r := &RateLimiter{
+		rate:  uint64(rate),
+		burst: uint64(burst),
+		per:   uint64(per),
+
+		last:  clk.Now(),
+		clock: clk,
 	}
 
-	if rate == 0 {
-		r.unlimited = true
+	if rate > 0 {
+		r.cost = (r.per * _NS) / r.rate
+		r.tokens = r.burst * r.cost
+		r.maxtok = r.tokens
 	}
 
-	return &r, nil
+	return r, nil
 }
 
-
-// Compute elapsed time in milliseconds since 'last'
-func (r *RateLimiter) elapsed(last time.Time) (now time.Time, since float64) {
-	now = r.clock.Now()
-	nsec := now.Sub(last).Nanoseconds()
-	since = float64(nsec) / 1.0e6
-
-	return now, since
+// Reset the rate limiter
+func (r *RateLimiter) Reset() {
+	if r.rate > 0 {
+		r.tokens = r.burst * r.cost
+		r.last = r.clock.Now()
+	}
 }
 
-// Return true if we can take 'n' tokens, false otherwise
-func (r *RateLimiter) CanTake(vn uint) bool {
-
-	if r.unlimited {
+// MaybeTake attempts to take 'vn' tokens from the rate limiter.
+// Returns true if it can take all of them, false otherwise.
+func (r *RateLimiter) MaybeTake(vn uint) (ok bool) {
+	if r.rate == 0 {
 		return true
 	}
 
-	r.Lock()
-	defer r.Unlock()
+	now := r.clock.Now()
 
-	var since float64
+	r.mu.Lock()
+	r.tokens += uint64(now.Sub(r.last).Nanoseconds())
+	r.last = now
 
-	n := float64(vn)
-	r.last, since = r.elapsed(r.last)
-	r.tokens += (since * r.frac)
-
-	if r.tokens > r.clamp {
-		r.tokens = r.clamp
+	if r.tokens > r.maxtok {
+		r.tokens = r.maxtok
 	}
 
-	if r.tokens < n {
-		return false
+	if want := uint64(vn) * r.cost; r.tokens >= want {
+		r.tokens -= want
+		ok = true
 	}
 
-	r.tokens -= n
-	return true
+	r.mu.Unlock()
+	return ok
 }
 
 // Return true if the current call exceeds the set rate, false
 // otherwise
 func (r *RateLimiter) Limit() bool {
-	return !r.CanTake(1)
+	return !r.MaybeTake(1)
 }
-
 
 // Stringer implementation for RateLimiter
 func (r RateLimiter) String() string {
-	return fmt.Sprintf("dripfill: %3.4f toks every ms burst: %3.1f toks; %3.4f toks avail",
-		r.frac, r.clamp, r.tokens)
+	return fmt.Sprintf("ratelimiter(%d/%ds +%d): cost/pkt: %d toks, max %d toks; avail %d toks",
+		r.rate, r.per, r.burst, r.cost, r.maxtok, r.tokens)
 }
 
 // vim: noexpandtab:ts=8:sw=8:tw=92:

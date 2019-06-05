@@ -64,6 +64,9 @@ func TestUnlimited(t *testing.T) {
 	assert := newAsserter(t)
 
 	rl, err := New(0, 0)
+	assert(err != nil, "expected err to be non-nil")
+
+	rl, err = New(0, 1)
 	assert(err == nil, "expected err to be nil; saw %s", err)
 
 	assert(!rl.Limit(), "expected rl to not limit")
@@ -119,7 +122,7 @@ func TestBurst(t *testing.T) {
 	rl, err := NewBurstWithClock(3, 2, 5, clk)
 	assert(err == nil, "expected err to be nil; saw %s", err)
 
-	assert(rl.CanTake(5), "expected to take 5 burst")
+	assert(rl.MaybeTake(5), "expected to take 5 burst")
 
 	assert(rl.Limit(), "expected rl to limit after burst")
 
