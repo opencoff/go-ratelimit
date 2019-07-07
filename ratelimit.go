@@ -42,22 +42,26 @@ import (
 // RateLimiter represents a token-bucket rate limiter
 type RateLimiter struct {
 	mu     sync.Mutex
-	cost   uint64    // cost per packet in units of nanoseconds
+	cost   uint64    // cost per token in units of nanoseconds
 	tokens uint64    // tokens in the bucket
 	maxtok uint64    // max tokens possible in the given time interval
 	last   time.Time // last time we refreshed tokens
 
-	rate  uint64 // rate of drain
-	burst uint64 // burst rate
-	per   uint64 // seconds over which rate is measured
+	clock Clock	// timekeeper
 
-	clock Clock // timekeeper
+	rate  uint64	// rate of drain
+	burst uint64	// burst rate
+	per   uint64	// seconds over which rate is measured
+
 }
 
 // Clock provides an interface to timekeeping. It is used in test harness.
 type Clock interface {
 	// Return current time in seconds
 	Now() time.Time
+
+	// Sleep for a given time
+	Sleep(time.Duration)
 }
 
 const (
@@ -69,6 +73,10 @@ type defaultTime int
 
 func (*defaultTime) Now() time.Time {
 	return time.Now()
+}
+
+func (*defaultTime) Sleep(d time.Duration) {
+	time.Sleep(d)
 }
 
 // Create new limiter that limits to 'rate' every 'per' seconds
@@ -161,6 +169,41 @@ func (r *RateLimiter) MaybeTake(vn uint) (ok bool) {
 // otherwise
 func (r *RateLimiter) Limit() bool {
 	return !r.MaybeTake(1)
+}
+
+// Wait until we have at least 'n' tokens available
+func (r *RateLimiter) Wait(n uint) bool {
+	if r.rate == 0 {
+		return true
+	}
+
+	want := uint64(n) * r.cost
+	for {
+		r.mu.Lock()
+
+		now := r.clock.Now()
+		r.tokens += uint64(now.Sub(r.last).Nanoseconds())
+		r.last = now
+
+		if r.tokens >= want {
+			r.tokens -= want
+			break
+		}
+
+		// otherwise, grab as many as we can ..
+		want -= r.tokens
+		r.tokens = 0
+
+		r.mu.Unlock()
+
+		dur := time.Duration(want)
+		r.clock.Sleep(dur)
+		// FIXME will we block indefinitely on a loaded system where others are
+		// taking all the available tokens?
+	}
+
+	r.mu.Unlock()
+	return true
 }
 
 // Stringer implementation for RateLimiter

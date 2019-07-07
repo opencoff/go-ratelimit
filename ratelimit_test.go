@@ -26,12 +26,22 @@ type tClock struct {
 }
 
 func newtClock() *tClock {
-	t := &tClock{Time: time.Unix(789133, 899152383)}
+	t := &tClock{
+		Time: time.Unix(0, 5000),
+	}
+
 	return t
 }
 
 func (f *tClock) Now() time.Time {
 	return f.Time
+}
+
+func (f *tClock) Sleep(d time.Duration) {
+	end := f.Time.Add(d)
+	for f.Time.Before(end) {
+		time.Sleep(200 * time.Microsecond)
+	}
 }
 
 // Advance clock by 'by' milliseconds
@@ -127,7 +137,45 @@ func TestBurst(t *testing.T) {
 	clk.advance(700)
 	assert(!rl.Limit(), "expected rl to not limit after refill")
 
-	assert(!rl.CanTake(3), "expected burst 3 to fail")
+	assert(!rl.MaybeTake(3), "expected burst 3 to fail")
+}
+
+
+func TestWait(t *testing.T) {
+	clk := newtClock()
+	assert := newAsserter(t)
+
+	// 5 tokens per second
+	rl, err := NewWithClock(5, 1, clk)
+	assert(err == nil, "expected err to be nil; saw %s", err)
+
+	assert(rl.MaybeTake(5), "expected to take 5")
+
+	// If we ask to Wait(2), then we should return after we have
+	// advanced the clock by the "cost"  = (1 * Nanosecond) / 5
+
+	// cost per token (same formula as ratelimiter)
+	cost := (1 * _NS) / 5
+	want := 2 * cost
+
+	exp := clk.Time.Add(time.Duration(want))
+
+	// Ticker
+	go func() {
+		// wait for a sleeper to begin their sleep
+		by := 10000 // microseconds
+		for want > 0 {
+			time.Sleep(10 * time.Microsecond)
+			z := time.Duration(by) * time.Microsecond
+			clk.Time = clk.Time.Add(z)
+			want -= uint64(z)
+		}
+	}()
+
+	assert(rl.Wait(2), "can't wait? %s", rl)
+
+	delta := clk.Time.Sub(exp).Nanoseconds()
+	assert(delta == 0, "clock drift? exp 0, saw %d", delta)
 }
 
 // vim: noexpandtab:ts=8:sw=8:tw=92:
