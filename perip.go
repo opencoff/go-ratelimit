@@ -57,24 +57,54 @@ func NewPerIP(ratex, perx uint, max int) (*PerIPRateLimiter, error) {
 	return p, nil
 }
 
+func (p *PerIPRateLimiter) probe(a net.Addr) *RateLimiter {
+	s := a.String()
+	v, _ := p.rl.Probe(s, func (_ interface{}) interface{} {
+		z, _ := New(p.rate, p.per)
+		return z
+	})
+	return v.(*RateLimiter)
+}
+
+// Reset ratelimiter state for this host
+func (p *PerIPRateLimiter) Reset(a net.Addr) {
+	z := p.probe(a)
+	z.Reset()
+}
+
+// MaybeTake attempts to take 'n' tokens for the host 'a'
+// Returns true if it can take all of them, false otherwise.
+func (p *PerIPRateLimiter) MaybeTake(a net.Addr, n uint) bool {
+	// Unlimited rate
+	if p.rl == nil {
+		return false
+	}
+	z := p.probe(a)
+	return z.MaybeTake(n)
+}
+
 // Return true if the source 'a' needs to be rate limited, false
 // otherwise.
 func (p *PerIPRateLimiter) Limit(a net.Addr) bool {
-
 	// Unlimited rate
 	if p.rl == nil {
 		return false
 	}
 
-	s := a.String()
-
-	v, _ := p.rl.Probe(s, func (_ interface{}) interface{} {
-			z, _ := New(p.rate, p.per)
-			return z
-		})
-	z := v.(*RateLimiter)
-
+	z := p.probe(a)
 	return z.Limit()
+}
+
+
+// Wait until requested tokens (n) become available for this host 'a'
+func (p *PerIPRateLimiter) Wait(a net.Addr, n uint) bool {
+	// Unlimited rate
+	if p.rl == nil {
+		return false
+	}
+
+	z := p.probe(a)
+	return z.Wait(n)
 }
 
 // vim: noexpandtab:ts=8:sw=8:tw=92:
