@@ -1,19 +1,7 @@
-# go-ratelimit - Simple token bucket rate limiter
+# go-ratelimit - Simple wrapper around `golang.org/x/time/rate`
 
 ## What is it?
-Token bucket ratelimiter for golang; this implementation doesn't use
-any timers or channels.
+Token bucket ratelimiter for golang; it wraps the `Limiter` in
+`golang.org/x/time/rate`. It implements global *and* per-host rate limits.
+It uses an LRU cache to cache the most frequently used per-host limiters.
 
-- The core idea is that every call to ask for a token also "drip fills"
-  the bucket with fractional tokens.
-- To evenly drip-fill the bucket, we do all our calculations in
-  millseconds.
-- The interface supports creating rate limiter instances with a burst factor.
-
-There is an ancilliary class to do per-IP ratelimiting that uses the
-underlying library. The per-IP module use a fixed size LRU cache of the underlying
-ratelimiter.
-
-## Notes
-This is based on Anti Huimaa's very clever token bucket algorithm:
-http://stackoverflow.com/questions/667508/whats-a-good-rate-limiting-algorithm

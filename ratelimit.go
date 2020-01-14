@@ -1,215 +1,158 @@
-// ratelimit.go - Token bucket ratelimiter
+// ratelimit.go - Rate limiter wrapper around golang.org/x/time/rate
 //
-// (c) 2013 Sudhi Herle <sudhi-dot-herle-at-gmail-com>
-//
+// Author: Sudhi Herle <sudhi@herle.net>
 // License: GPLv2
 //
-
-// Package ratelimit implements a token bucket rate limiter. It does NOT use any
-// timers or channels in its implementation. The core idea is that every call
-// to ask for a Token also "drip fills" the bucket with fractional tokens.
-// To evenly drip-fill the bucket, we do all our calculations in nanoseconds.
+// This software does not come with any express or implied
+// warranty; it is provided "as is". No claim  is made to its
+// suitability for any purpose.
 //
-// To ratelimit incoming connections on a per source basis, a convenient helper
-// constructor is available for "PerIPRateLimiter".
+
+// Package ratelimit wraps the Limiter from golang.org/x/time/rate
+// and creates a simple interface for global and per-host limits.
 //
 // Usage:
-//    // Ratelimit to 1000 every 5 seconds
-//    rl = ratelimit.New(1000, 5)
+//    // Ratelimit globally to 1000 req/s, per-host to 5 req/s and cache
+//    // latest 30000 per-host limits
+//    rl = ratelimit.New(1000, 5, 30000)
 //
 //    ....
-//    if rl.Limit() {
+//    if !rl.Allow() {
+//       dropConnection(conn)
+//    }
+//
+//    if  !rl.AllowHost(conn.RemoteAddr()) {
 //       dropConnection(conn)
 //    }
 package ratelimit
 
-// Notes:
-//
-// - A Clock interface abstracts the timekeeping; useful for test harness
-// - Most callers will call the New() function; the test suite
-//   calls the NewWithClock() constructor.
-// - This is a very simple interface for token-bucket rate limiter.
-// - Based on Anti Huimaa's very clever token bucket algorithm:
-//   http://stackoverflow.com/questions/667508/whats-a-good-rate-limiting-algorithm
-//
-
 import (
+	"context"
 	"fmt"
-	"sync"
-	"time"
+	"github.com/opencoff/golang-lru"
+	"golang.org/x/time/rate"
+	"net"
 )
 
-// RateLimiter represents a token-bucket rate limiter
+// RateLimiter controls how frequently events are allowed to happen globally or
+// per-host. It uses a token-bucket limiter for the global limit and instantiates
+// a token-bucket limiter for every unique host. The number of per-host limiters
+// is limited to an upper bound ("cache size").
+//
+// A negative rate limit means "no limit" and a zero rate limit means "Infinite".
 type RateLimiter struct {
-	mu     sync.Mutex
-	cost   uint64    // cost per token in units of nanoseconds
-	tokens uint64    // tokens in the bucket
-	maxtok uint64    // max tokens possible in the given time interval
-	last   time.Time // last time we refreshed tokens
+	// Global rate limiter; thread-safe
+	gl *rate.Limiter
 
-	clock Clock	// timekeeper
+	// Per-host limiter organized as an LRU cache; thread-safe
+	h lru.Cache
 
-	rate  uint64	// rate of drain
-	burst uint64	// burst rate
-	per   uint64	// seconds over which rate is measured
+	// per host rate limit (qps)
+	p rate.Limit
+	g rate.Limit
 
+	// burst rate for per-host
+	b int
+
+	cache int
 }
 
-// Clock provides an interface to timekeeping. It is used in test harness.
-type Clock interface {
-	// Return current time in seconds
-	Now() time.Time
-
-	// Sleep for a given time
-	Sleep(time.Duration)
-}
-
-const (
-	_NS uint64 = 1000000000 // number of nanosecs in 1 sec
-)
-
-// dummy type
-type defaultTime int
-
-func (*defaultTime) Now() time.Time {
-	return time.Now()
-}
-
-func (*defaultTime) Sleep(d time.Duration) {
-	time.Sleep(d)
-}
-
-// Create new limiter that limits to 'rate' every 'per' seconds
-func New(rate, per uint) (*RateLimiter, error) {
-	clk := defaultTime(0)
-	return NewBurstWithClock(rate, per, 0, &clk)
-}
-
-// Make a new rate limiter using a custom timekeeper
-func NewWithClock(rate, per uint, clk Clock) (*RateLimiter, error) {
-	return NewBurstWithClock(rate, per, 0, clk)
-}
-
-// Create new limiter that limits to 'rate' every 'per' seconds with
-// burst of 'b' tokens in the same time period. The notion of burst
-// is only meaningful when it is larger than its normal rate. Thus,
-// bursts smaller than the actual rate are ignored.
-func NewBurst(rate, per, burst uint) (*RateLimiter, error) {
-	clk := defaultTime(0)
-
-	return NewBurstWithClock(rate, per, burst, &clk)
-}
-
-// Create new limiter with a custom time keeper that limits to 'rate'
-// every 'per' seconds with burst of 'b' tokens in the same time period.
-// The notion of burst is only meaningful when it is larger than its
-// normal rate. Thus, bursts smaller than the actual rate are ignored.
-func NewBurstWithClock(rate, per, burst uint, clk Clock) (*RateLimiter, error) {
-	if per == 0 {
-		return nil, fmt.Errorf("ratelimit: duration can't be zero")
+// Create a new token bucket rate limiter that limits globally at 'g'  requests/sec
+// and per-host at 'p' requests/sec; It remembers the rate of the 'cachesize' most
+// recent hosts (and their limits). The burst rates are pre-configured to be:
+// Global burst limit: 3 * b; Per host burst limit:  2 * p
+func New(g, p, cachesize int) (*RateLimiter, error) {
+	l, err := lru.New2Q(cachesize)
+	if err != nil {
+		return nil, fmt.Errorf("ratelimit: can't create LRU cache: %s", err)
 	}
 
-	if burst == 0 {
-		burst = rate
+	b := 2 * p
+	if b < 0 {
+		b = 0
 	}
+
+	gl := limit(g)
+	pl := limit(p)
 
 	r := &RateLimiter{
-		rate:  uint64(rate),
-		burst: uint64(burst),
-		per:   uint64(per),
-
-		last:  clk.Now(),
-		clock: clk,
-	}
-
-	if rate > 0 {
-		r.cost = (r.per * _NS) / r.rate
-		r.tokens = r.burst * r.cost
-		r.maxtok = r.tokens
+		gl:    rate.NewLimiter(gl, 3*g),
+		h:     l,
+		p:     pl,
+		g:     gl,
+		b:     b,
+		cache: cachesize,
 	}
 
 	return r, nil
 }
 
-// Reset the rate limiter
-func (r *RateLimiter) Reset() {
-	if r.rate > 0 {
-		r.tokens = r.burst * r.cost
-		r.last = r.clock.Now()
-	}
+// Wait blocks until the ratelimiter permits the configured global rate limit.
+// It returns an error if the burst exceeds the configured limit or the
+// context is cancelled.
+func (r *RateLimiter) Wait(ctx context.Context) error {
+	return r.gl.Wait(ctx)
 }
 
-// MaybeTake attempts to take 'vn' tokens from the rate limiter.
-// Returns true if it can take all of them, false otherwise.
-func (r *RateLimiter) MaybeTake(vn uint) (ok bool) {
-	if r.rate == 0 {
-		return true
-	}
-
-	now := r.clock.Now()
-
-	r.mu.Lock()
-	r.tokens += uint64(now.Sub(r.last).Nanoseconds())
-	r.last = now
-
-	if r.tokens > r.maxtok {
-		r.tokens = r.maxtok
-	}
-
-	if want := uint64(vn) * r.cost; r.tokens >= want {
-		r.tokens -= want
-		ok = true
-	}
-
-	r.mu.Unlock()
-	return ok
+// WaitHost blocks until the ratelimiter permits the configured per-host
+// rate limit from host 'a'.
+// It returns an error if the burst exceeds the configured limit or the
+// context is cancelled.
+func (r *RateLimiter) WaitHost(ctx context.Context, a net.Addr) error {
+	k := a.String()
+	rl := r.getRL(k)
+	return rl.Wait(ctx)
 }
 
-// Return true if the current call exceeds the set rate, false
-// otherwise
-func (r *RateLimiter) Limit() bool {
-	return !r.MaybeTake(1)
+// Allow returns true if the global rate limit can consume 1 token and
+// false otherwise. Use this if you intend to drop/skip events that exceed
+// a configured global rate limit, otherwise, use Wait().
+func (r *RateLimiter) Allow() bool {
+	return r.gl.Allow()
 }
 
-// Wait until we have at least 'n' tokens available
-func (r *RateLimiter) Wait(n uint) bool {
-	if r.rate == 0 {
-		return true
-	}
-
-	want := uint64(n) * r.cost
-	for {
-		r.mu.Lock()
-
-		now := r.clock.Now()
-		r.tokens += uint64(now.Sub(r.last).Nanoseconds())
-		r.last = now
-
-		if r.tokens >= want {
-			r.tokens -= want
-			break
-		}
-
-		// otherwise, grab as many as we can ..
-		want -= r.tokens
-		r.tokens = 0
-
-		r.mu.Unlock()
-
-		dur := time.Duration(want)
-		r.clock.Sleep(dur)
-		// FIXME will we block indefinitely on a loaded system where others are
-		// taking all the available tokens?
-	}
-
-	r.mu.Unlock()
-	return true
+// AllowHost returns true if the per-host rate limit for host 'a' can consume
+// 1 token and false otherwise. Use this if you intend to drop/skip events
+// that exceed a configured global rate limit, otherwise, use WaitHost().
+func (r *RateLimiter) AllowHost(a net.Addr) bool {
+	k := a.String()
+	rl := r.getRL(k)
+	return rl.Allow()
 }
 
-// Stringer implementation for RateLimiter
+// String returns a printable representation of the limiter
 func (r RateLimiter) String() string {
-	return fmt.Sprintf("ratelimiter(%d/%ds +%d): cost/pkt: %d toks, max %d toks; avail %d toks",
-		r.rate, r.per, r.burst, r.cost, r.maxtok, r.tokens)
+	return fmt.Sprintf("ratelimiter: Global %4.2 rps, Per host %4.2 rps, LRU cache %d entries",
+		r.g, r.p, r.cache)
 }
 
-// vim: noexpandtab:ts=8:sw=8:tw=92:
+// get or create a new per-host rate limiter.
+// this function evicts the least used limiter from the LRU cache
+func (r *RateLimiter) getRL(k string) *rate.Limiter {
+	v, _ := r.h.Probe(k, func(k interface{}) interface{} {
+		return rate.NewLimiter(r.p, r.b)
+	})
+
+	rl, ok := v.(*rate.Limiter)
+	if !ok {
+		panic(fmt.Sprintf("ratelimiter: bad type %t for host %s in per-host limiter", v, k))
+	}
+	return rl
+}
+
+func limit(r int) rate.Limit {
+	var g rate.Limit
+
+	switch {
+	case r < 0:
+		g = rate.Inf
+	case r == 0:
+		g = 0.0
+	default:
+		g = rate.Limit(r)
+	}
+
+	return g
+}
+
+// EOF
