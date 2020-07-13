@@ -99,8 +99,7 @@ func (r *RateLimiter) Wait(ctx context.Context) error {
 // It returns an error if the burst exceeds the configured limit or the
 // context is cancelled.
 func (r *RateLimiter) WaitHost(ctx context.Context, a net.Addr) error {
-	k := a.String()
-	rl := r.getRL(k)
+	rl := r.getRL(a)
 	return rl.Wait(ctx)
 }
 
@@ -115,8 +114,7 @@ func (r *RateLimiter) Allow() bool {
 // 1 token and false otherwise. Use this if you intend to drop/skip events
 // that exceed a configured global rate limit, otherwise, use WaitHost().
 func (r *RateLimiter) AllowHost(a net.Addr) bool {
-	k := a.String()
-	rl := r.getRL(k)
+	rl := r.getRL(a)
 	return rl.Allow()
 }
 
@@ -128,7 +126,8 @@ func (r RateLimiter) String() string {
 
 // get or create a new per-host rate limiter.
 // this function evicts the least used limiter from the LRU cache
-func (r *RateLimiter) getRL(k string) *rate.Limiter {
+func (r *RateLimiter) getRL(a net.Addr) *rate.Limiter {
+	k := host(a)
 	v, _ := r.h.Probe(k, func(k interface{}) interface{} {
 		return rate.NewLimiter(r.p, r.b)
 	})
@@ -138,6 +137,16 @@ func (r *RateLimiter) getRL(k string) *rate.Limiter {
 		panic(fmt.Sprintf("ratelimiter: bad type %t for host %s in per-host limiter", v, k))
 	}
 	return rl
+}
+
+
+// return the host from the address
+func host(a net.Addr) string {
+	s := a.String()
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		return h
+	}
+	return s
 }
 
 func limit(r int) rate.Limit {
