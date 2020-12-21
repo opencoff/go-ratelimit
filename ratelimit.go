@@ -34,13 +34,13 @@ import (
 	"net"
 )
 
-// RateLimiter controls how frequently events are allowed to happen globally or
+// Limiter controls how frequently events are allowed to happen globally or
 // per-host. It uses a token-bucket limiter for the global limit and instantiates
 // a token-bucket limiter for every unique host. The number of per-host limiters
 // is limited to an upper bound ("cache size").
 //
 // A negative rate limit means "no limit" and a zero rate limit means "Infinite".
-type RateLimiter struct {
+type Limiter struct {
 	// Global rate limiter; thread-safe
 	gl *rate.Limiter
 
@@ -61,7 +61,7 @@ type RateLimiter struct {
 // and per-host at 'p' requests/sec; It remembers the rate of the 'cachesize' most
 // recent hosts (and their limits). The burst rates are pre-configured to be:
 // Global burst limit: 3 * b; Per host burst limit:  2 * p
-func New(g, p, cachesize int) (*RateLimiter, error) {
+func New(g, p, cachesize int) (*Limiter, error) {
 	l, err := lru.New2Q(cachesize)
 	if err != nil {
 		return nil, fmt.Errorf("ratelimit: can't create LRU cache: %s", err)
@@ -75,7 +75,7 @@ func New(g, p, cachesize int) (*RateLimiter, error) {
 	gl := limit(g)
 	pl := limit(p)
 
-	r := &RateLimiter{
+	r := &Limiter{
 		gl:    rate.NewLimiter(gl, 3*g),
 		h:     l,
 		p:     pl,
@@ -90,7 +90,7 @@ func New(g, p, cachesize int) (*RateLimiter, error) {
 // Wait blocks until the ratelimiter permits the configured global rate limit.
 // It returns an error if the burst exceeds the configured limit or the
 // context is cancelled.
-func (r *RateLimiter) Wait(ctx context.Context) error {
+func (r *Limiter) Wait(ctx context.Context) error {
 	return r.gl.Wait(ctx)
 }
 
@@ -98,7 +98,7 @@ func (r *RateLimiter) Wait(ctx context.Context) error {
 // rate limit from host 'a'.
 // It returns an error if the burst exceeds the configured limit or the
 // context is cancelled.
-func (r *RateLimiter) WaitHost(ctx context.Context, a net.Addr) error {
+func (r *Limiter) WaitHost(ctx context.Context, a net.Addr) error {
 	rl := r.getRL(a)
 	return rl.Wait(ctx)
 }
@@ -106,27 +106,27 @@ func (r *RateLimiter) WaitHost(ctx context.Context, a net.Addr) error {
 // Allow returns true if the global rate limit can consume 1 token and
 // false otherwise. Use this if you intend to drop/skip events that exceed
 // a configured global rate limit, otherwise, use Wait().
-func (r *RateLimiter) Allow() bool {
+func (r *Limiter) Allow() bool {
 	return r.gl.Allow()
 }
 
 // AllowHost returns true if the per-host rate limit for host 'a' can consume
 // 1 token and false otherwise. Use this if you intend to drop/skip events
 // that exceed a configured global rate limit, otherwise, use WaitHost().
-func (r *RateLimiter) AllowHost(a net.Addr) bool {
+func (r *Limiter) AllowHost(a net.Addr) bool {
 	rl := r.getRL(a)
 	return rl.Allow()
 }
 
 // String returns a printable representation of the limiter
-func (r RateLimiter) String() string {
+func (r Limiter) String() string {
 	return fmt.Sprintf("ratelimiter: Global %4.2 rps, Per host %4.2 rps, LRU cache %d entries",
 		r.g, r.p, r.cache)
 }
 
 // get or create a new per-host rate limiter.
 // this function evicts the least used limiter from the LRU cache
-func (r *RateLimiter) getRL(a net.Addr) *rate.Limiter {
+func (r *Limiter) getRL(a net.Addr) *rate.Limiter {
 	k := host(a)
 	v, _ := r.h.Probe(k, func(k interface{}) interface{} {
 		return rate.NewLimiter(r.p, r.b)
