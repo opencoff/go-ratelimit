@@ -12,24 +12,25 @@
 // and creates a simple interface for global and per-host limits.
 //
 // Usage:
-//    // Ratelimit globally to 1000 req/s, per-host to 5 req/s and cache
-//    // latest 30000 per-host limits
-//    rl = ratelimit.New(1000, 5, 30000)
 //
-//    ....
-//    if !rl.Allow() {
-//       dropConnection(conn)
-//    }
+//	// Ratelimit globally to 1000 req/s, per-host to 5 req/s and cache
+//	// latest 30000 per-host limits
+//	rl = ratelimit.New(1000, 5, 30000)
 //
-//    if  !rl.AllowHost(conn.RemoteAddr()) {
-//       dropConnection(conn)
-//    }
+//	....
+//	if !rl.Allow() {
+//	   dropConnection(conn)
+//	}
+//
+//	if  !rl.AllowHost(conn.RemoteAddr()) {
+//	   dropConnection(conn)
+//	}
 package ratelimit
 
 import (
 	"context"
 	"fmt"
-	"github.com/opencoff/golang-lru"
+	"github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/time/rate"
 	"net"
 )
@@ -45,7 +46,7 @@ type Limiter struct {
 	gl *rate.Limiter
 
 	// Per-host limiter organized as an LRU cache; thread-safe
-	h lru.Cache
+	h *lru.TwoQueueCache[string, *rate.Limiter]
 
 	// per host rate limit (qps)
 	p rate.Limit
@@ -62,7 +63,7 @@ type Limiter struct {
 // recent hosts (and their limits). The burst rates are pre-configured to be:
 // Global burst limit: 3 * b; Per host burst limit:  2 * p
 func New(g, p, cachesize int) (*Limiter, error) {
-	l, err := lru.New2Q(cachesize)
+	l, err := lru.New2Q[string, *rate.Limiter](cachesize)
 	if err != nil {
 		return nil, fmt.Errorf("ratelimit: can't create LRU cache: %s", err)
 	}
@@ -128,17 +129,13 @@ func (r Limiter) String() string {
 // this function evicts the least used limiter from the LRU cache
 func (r *Limiter) getRL(a net.Addr) *rate.Limiter {
 	k := host(a)
-	v, _ := r.h.Probe(k, func(k interface{}) interface{} {
-		return rate.NewLimiter(r.p, r.b)
-	})
-
-	rl, ok := v.(*rate.Limiter)
+	rl, ok := r.h.Get(k)
 	if !ok {
-		panic(fmt.Sprintf("ratelimiter: bad type %t for host %s in per-host limiter", v, k))
+		rl = rate.NewLimiter(r.p, r.b)
+		r.h.Add(k, rl)
 	}
 	return rl
 }
-
 
 // return the host from the address
 func host(a net.Addr) string {
